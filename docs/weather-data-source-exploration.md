@@ -99,6 +99,22 @@ products where feasible:
 If the goal remains a personal unpublished extension, the current provider can
 stay while the branch prototypes the documented-product provider.
 
+## Implementation Status
+
+This branch now uses documented `reg.bom.gov.au/fwo/*.xml` forecast products
+for the initial location catalogue instead of the restricted weather API. The
+first implementation supports Brisbane and Brisbane Airport from `IDQ10095`.
+Daily forecasts are parsed from the XML product and cached locally.
+
+Known gaps:
+
+- Location search is currently a curated documented-product catalogue, not a
+  full national suburb/postcode search.
+- Hourly forecasts are unavailable from this first documented-product provider.
+- Observations are not wired yet.
+- Warnings are best-effort and return an empty list if a documented state
+  warning product is unavailable or not parseable.
+
 ## Sources Checked
 
 - Bureau Weather Data Services:
