@@ -63,6 +63,7 @@
   "dependencies": {
     "@raycast/api": "^1.104.17",
     "@raycast/utils": "^2.2.4",
+    "basic-ftp": "^6.0.1",
     "gifenc": "^1.0.3",
     "pngjs": "^7.0.0"
   },
