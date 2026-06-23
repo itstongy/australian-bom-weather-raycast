@@ -4,6 +4,7 @@ import { groupRadarSites } from "../src/bom/catalog";
 import { baseOverlayProductId } from "../src/bom/render";
 import { isRadarFrame } from "../src/bom/types";
 import { selectDefaultLocation } from "../src/location-selection";
+import { radarImageMarkdown } from "../src/radar-markdown";
 import {
   normalizeGeohash,
   summarizeCurrentWeather,
@@ -42,6 +43,19 @@ test("radar frame validation rejects malformed BoM cache payloads", () => {
   assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png" }), true);
   assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: null }), false);
   assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png", timestamp: null }), false);
+});
+
+test("radar image markdown uses an encoded file URL for Raycast detail images", () => {
+  const markdown = radarImageMarkdown({
+    alt: "IDR664 radar loop",
+    path: "/Users/tongy/Library/Application Support/com.raycast-x.macos/extensions/australian-bom-weather/cache/gifs/IDR664/10-abc.gif",
+    size: 430,
+  });
+
+  assert.equal(
+    markdown,
+    "![IDR664 radar loop](file:///Users/tongy/Library/Application%20Support/com.raycast-x.macos/extensions/australian-bom-weather/cache/gifs/IDR664/10-abc.gif?raycast-width=430&raycast-height=430)",
+  );
 });
 
 test("warning formatting falls back cleanly when BoM fields are sparse", () => {

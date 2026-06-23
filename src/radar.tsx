@@ -18,6 +18,7 @@ import {
   siblingProducts,
   siteKey,
 } from "./bom";
+import { radarImageMarkdown } from "./radar-markdown";
 import {
   CatalogState,
   clearQuickFavorite,
@@ -363,7 +364,11 @@ export function RadarLoop({
   const markdown = [
     `# ${result.product.site}`,
     "",
-    `![${result.product.id} radar loop](${result.gifPath}?raycast-width=${DISPLAY_SIZE}&raycast-height=${DISPLAY_SIZE})`,
+    radarImageMarkdown({
+      alt: `${result.product.id} radar loop`,
+      path: result.gifPath,
+      size: DISPLAY_SIZE,
+    }),
     "",
     `**${result.product.label}** · ${result.product.state} · ${result.product.id} · ${result.frames} frames`,
     staleNote,
