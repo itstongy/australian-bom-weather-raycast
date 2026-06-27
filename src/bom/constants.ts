@@ -1,4 +1,6 @@
 export const BASE_URL = "https://reg.bom.gov.au";
+export const FTP_HOST = "ftp.bom.gov.au";
+export const FTP_RADAR_DIR = "/anon/gen/radar";
 
 export const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 BOMWeatherRaycast/0.1";

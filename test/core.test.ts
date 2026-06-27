@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { groupRadarSites } from "../src/bom/catalog";
+import { radarFrameFromFtpName } from "../src/bom/frames";
 import { baseOverlayProductId } from "../src/bom/render";
 import { isRadarFrame } from "../src/bom/types";
 import { selectDefaultLocation } from "../src/location-selection";
@@ -42,6 +43,15 @@ test("radar frame validation rejects malformed BoM cache payloads", () => {
   assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png" }), true);
   assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: null }), false);
   assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png", timestamp: null }), false);
+});
+
+test("radar FTP filenames map to web-downloadable frame metadata", () => {
+  assert.deepEqual(radarFrameFromFtpName("IDR662", "IDR662.T.202605162134.png"), {
+    url: "https://reg.bom.gov.au/radar/IDR662.T.202605162134.png",
+    file: "IDR662.T.202605162134.png",
+    timestamp: "202605162134",
+  });
+  assert.equal(radarFrameFromFtpName("IDR662", "IDR663.T.202605162134.png"), null);
 });
 
 test("warning formatting falls back cleanly when BoM fields are sparse", () => {

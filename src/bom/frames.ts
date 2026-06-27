@@ -1,6 +1,12 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
-import { BASE_URL, FRAME_INDEX_TTL_MS } from "./constants";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { Client } from "basic-ftp";
+import {
+  BASE_URL,
+  FRAME_INDEX_TTL_MS,
+  FTP_HOST,
+  FTP_RADAR_DIR,
+} from "./constants";
 import { cacheDir, readFreshJson, readJsonFile, writeJsonFile } from "./cache";
 import { httpGetBuffer, httpGetText } from "./http";
 import { htmlToText } from "./text";
@@ -10,8 +16,6 @@ import {
   RadarProduct,
   RadarUnavailableError,
 } from "./types";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 
 function isRadarFrameArray(value: unknown): value is RadarFrame[] {
   return Array.isArray(value) && value.every(isRadarFrame);
@@ -31,6 +35,17 @@ export async function scrapeFrames(product: RadarProduct): Promise<{
 
   const stale = readJsonFile(cachePath, isRadarFrameArray);
   const statusReport = await fetchRadarStatusReport(product);
+
+  try {
+    const frames = await listFramesFromFtp(product);
+    if (frames.length > 0) {
+      writeJsonFile(cachePath, frames);
+      return { frames, statusReport };
+    }
+  } catch {
+    // Fall back to the legacy loop page source below.
+  }
+
   let html: string;
   try {
     html = await httpGetText(product.loopUrl);
@@ -61,6 +76,37 @@ export async function scrapeFrames(product: RadarProduct): Promise<{
   if (deduped.length === 0 && stale) return { frames: stale, statusReport };
   writeJsonFile(cachePath, deduped);
   return { frames: deduped, statusReport };
+}
+
+async function listFramesFromFtp(product: RadarProduct): Promise<RadarFrame[]> {
+  const client = new Client(15000);
+  try {
+    await client.access({ host: FTP_HOST });
+    const entries = await client.list(FTP_RADAR_DIR);
+    return entries
+      .map((entry) => radarFrameFromFtpName(product.id, entry.name))
+      .filter((frame): frame is RadarFrame => Boolean(frame))
+      .sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+  } finally {
+    client.close();
+  }
+}
+
+export function radarFrameFromFtpName(
+  productId: string,
+  name: string,
+): RadarFrame | null {
+  const escapedProductId = productId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = name.match(
+    new RegExp(`^${escapedProductId}\\.T\\.(?<timestamp>\\d{12})\\.png$`),
+  );
+  if (!match) return null;
+
+  return {
+    url: `${BASE_URL}/radar/${name}`,
+    file: name,
+    timestamp: match.groups?.timestamp,
+  };
 }
 
 export async function downloadFrame(productId: string, frame: RadarFrame) {
