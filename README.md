@@ -53,8 +53,8 @@ This extension is for Australian weather data only. It does not provide NOAA/NWS
 For normal use, you do not need to keep a development server running. Build the extension, then import the local extension directory into Raycast.
 
 ```bash
-git clone https://github.com/itstongy/australian-bom-weather.git
-cd australian-bom-weather
+git clone https://github.com/itstongy/australian-bom-weather-raycast.git
+cd australian-bom-weather-raycast
 npm install
 npm run build
 ```
