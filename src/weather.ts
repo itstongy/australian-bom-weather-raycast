@@ -7,13 +7,34 @@ import {
   writeJsonFile,
 } from "./bom/cache";
 
-const BASE_URL = "https://api.weather.bom.gov.au/v1/locations";
+const FWO_BASE_URL = "https://reg.bom.gov.au/fwo";
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 BOMWeatherRaycast/0.1";
-const OBSERVATION_TTL_MS = 10 * 60 * 1000;
-const HOURLY_TTL_MS = 30 * 60 * 1000;
 const DAILY_TTL_MS = 60 * 60 * 1000;
 const WARNINGS_TTL_MS = 30 * 60 * 1000;
+
+const DOCUMENTED_FORECAST_LOCATIONS = [
+  {
+    geohash: "bom-qld-brisbane",
+    id: "IDQ10095:QLD_PT001",
+    name: "Brisbane",
+    postcode: "4000",
+    state: "QLD",
+    productId: "IDQ10095",
+    areaCode: "QLD_PT001",
+    forecastRegion: "Brisbane",
+  },
+  {
+    geohash: "bom-qld-brisbane-airport",
+    id: "IDQ10095:QLD_PT050",
+    name: "Brisbane Airport",
+    postcode: "4008",
+    state: "QLD",
+    productId: "IDQ10095",
+    areaCode: "QLD_PT050",
+    forecastRegion: "Brisbane",
+  },
+] satisfies DocumentedForecastLocation[];
 
 export type WeatherLocation = {
   geohash: string;
@@ -29,6 +50,12 @@ export type LocationSearchResult = {
   name: string;
   postcode: string;
   state: string;
+};
+
+type DocumentedForecastLocation = LocationSearchResult & {
+  productId: string;
+  areaCode: string;
+  forecastRegion: string;
 };
 
 export type WeatherBundle = {
@@ -145,17 +172,16 @@ export async function fetchWeatherBundle(
   location: WeatherLocation,
   options: FetchOptions = {},
 ): Promise<WeatherBundle> {
-  const [observation, hourly, daily, warnings] = await Promise.all([
-    fetchObservation(location.geohash, options).catch(() => null),
-    fetchHourly(location.geohash, options),
-    fetchDaily(location.geohash, options),
-    fetchWarnings(location.geohash, options).catch(() => []),
+  const documentedLocation = resolveDocumentedLocation(location);
+  const [daily, warnings] = await Promise.all([
+    fetchDaily(documentedLocation, options),
+    fetchWarnings(documentedLocation, options).catch(() => []),
   ]);
 
   return {
-    location,
-    observation,
-    hourly: normalizeHourlyForecast(hourly),
+    location: documentedLocation,
+    observation: null,
+    hourly: { metadata: daily.metadata, data: [] },
     daily: normalizeDailyForecast(daily),
     warnings: Array.isArray(warnings) ? warnings : [],
   };
@@ -166,17 +192,21 @@ export async function searchLocations(
 ): Promise<LocationSearchResult[]> {
   const query = term.trim();
   if (query.length < 2) return [];
-  const response = await httpGetJson<{ data: LocationSearchResult[] }>(
-    `${BASE_URL}?search=${encodeURIComponent(query)}`,
+  const normalizedQuery = query.toLocaleLowerCase("en-AU");
+  return DOCUMENTED_FORECAST_LOCATIONS.filter((location) =>
+    [location.name, location.state, location.postcode]
+      .filter(Boolean)
+      .some((value) =>
+        value.toLocaleLowerCase("en-AU").includes(normalizedQuery),
+      ),
   );
-  return response.data ?? [];
 }
 
 export async function fetchWarningsForLocation(
   location: WeatherLocation,
   options: FetchOptions = {},
 ): Promise<Warning[]> {
-  return fetchWarnings(location.geohash, options);
+  return fetchWarnings(resolveDocumentedLocation(location), options);
 }
 
 export function warningTitle(warning: Warning) {
@@ -232,9 +262,13 @@ export function summarizeCurrentWeather(bundle: WeatherBundle): CurrentWeather {
     today?.short_text ??
     descriptorToText(currentHour?.icon_descriptor, currentHour?.is_night);
   const rainRange = formatRainRange(
-    currentHour?.rain.amount.min,
-    currentHour?.rain.amount.max,
-    currentHour?.rain.amount.units,
+    currentHour?.rain.amount.min ??
+      today?.rain.amount.min ??
+      today?.rain.amount.lower_range,
+    currentHour?.rain.amount.max ??
+      today?.rain.amount.max ??
+      today?.rain.amount.upper_range,
+    currentHour?.rain.amount.units ?? today?.rain.amount.units,
   );
   const windDirection =
     bundle.observation?.wind?.direction ?? currentHour?.wind.direction;
@@ -247,7 +281,7 @@ export function summarizeCurrentWeather(bundle: WeatherBundle): CurrentWeather {
   const overnightMin = tomorrow?.temp_min;
   const max = bundle.observation?.max_temp?.value ?? today?.temp_max;
   const icon = iconForDescriptor(
-    currentHour?.icon_descriptor,
+    currentHour?.icon_descriptor ?? today?.icon_descriptor,
     currentHour?.is_night,
   );
   const rainChance = currentHour?.rain.chance ?? today?.rain.chance ?? 0;
@@ -358,13 +392,6 @@ function getCurrentHour(hours: HourlyForecastHour[]) {
   );
 }
 
-function normalizeHourlyForecast(value: HourlyForecast): HourlyForecast {
-  return {
-    metadata: value?.metadata ?? {},
-    data: Array.isArray(value?.data) ? value.data.filter(isHourlyHour) : [],
-  };
-}
-
 function normalizeDailyForecast(value: DailyForecast): DailyForecast {
   return {
     metadata: value?.metadata ?? {},
@@ -372,69 +399,220 @@ function normalizeDailyForecast(value: DailyForecast): DailyForecast {
   };
 }
 
-function isHourlyHour(value: unknown): value is HourlyForecastHour {
-  if (!value || typeof value !== "object") return false;
-  const hour = value as Partial<HourlyForecastHour>;
-  return (
-    typeof hour.time === "string" &&
-    typeof hour.temp === "number" &&
-    typeof hour.temp_feels_like === "number" &&
-    typeof hour.relative_humidity === "number" &&
-    typeof hour.icon_descriptor === "string" &&
-    typeof hour.is_night === "boolean" &&
-    typeof hour.rain?.chance === "number" &&
-    typeof hour.rain?.amount?.min === "number" &&
-    typeof hour.wind?.direction === "string" &&
-    typeof hour.wind?.speed_kilometre === "number" &&
-    typeof hour.wind?.gust_speed_kilometre === "number"
-  );
-}
-
 function isDailyDay(value: unknown): value is DailyForecastDay {
   if (!value || typeof value !== "object") return false;
   return typeof (value as Partial<DailyForecastDay>).date === "string";
 }
 
-function fetchObservation(geohash: string, options: FetchOptions) {
-  return fetchCachedResponse<{ data: Observation }>(
-    `weather-${geohash}-observation.json`,
-    OBSERVATION_TTL_MS,
-    `${BASE_URL}/${geohash}/observations`,
-    options,
-  ).then((response) => response.data ?? null);
-}
+function resolveDocumentedLocation(
+  location: WeatherLocation,
+): DocumentedForecastLocation {
+  const direct = DOCUMENTED_FORECAST_LOCATIONS.find(
+    (item) => item.geohash === location.geohash || item.id === location.id,
+  );
+  if (direct) return direct;
 
-function fetchHourly(geohash: string, options: FetchOptions) {
-  return fetchCachedResponse<HourlyForecast>(
-    `weather-${geohash}-hourly.json`,
-    HOURLY_TTL_MS,
-    `${BASE_URL}/${geohash}/forecasts/hourly`,
-    options,
+  const normalizedName = location.name.toLocaleLowerCase("en-AU");
+  const byName = DOCUMENTED_FORECAST_LOCATIONS.find(
+    (item) => item.name.toLocaleLowerCase("en-AU") === normalizedName,
+  );
+  if (byName) return byName;
+
+  throw new Error(
+    `${location.name} is not available from the documented BoM forecast product catalogue yet. Search and save one of the listed BoM product locations.`,
   );
 }
 
-function fetchDaily(geohash: string, options: FetchOptions) {
+function parseForecastXml(
+  xml: string,
+  location: DocumentedForecastLocation,
+): DailyForecast {
+  const area = findAreaByCode(xml, location.areaCode);
+  if (!area) {
+    throw new Error(
+      `${location.name} (${location.areaCode}) was not found in ${location.productId}.`,
+    );
+  }
+
+  return {
+    metadata: {
+      issue_time: tagText(xml, "issue-time-utc"),
+      next_issue_time: tagText(xml, "next-routine-issue-time-utc"),
+      forecast_region: location.forecastRegion,
+    },
+    data:
+      area
+        .match(/<forecast-period\b[\s\S]*?<\/forecast-period>/g)
+        ?.map(parseForecastPeriod) ?? [],
+  };
+}
+
+function parseForecastPeriod(period: string): DailyForecastDay {
+  const date = attr(period, "start-time-local") ?? new Date().toISOString();
+  const rainRange = parseRainRange(elementText(period, "precipitation_range"));
+  return {
+    date,
+    temp_min: numberOrUndefined(elementText(period, "air_temperature_minimum")),
+    temp_max: numberOrUndefined(elementText(period, "air_temperature_maximum")),
+    short_text: stripTrailingFullStop(textValue(period, "precis")),
+    extended_text: stripTrailingFullStop(textValue(period, "precis")),
+    icon_descriptor: iconDescriptorForCode(
+      elementText(period, "forecast_icon_code"),
+    ),
+    rain: {
+      chance: numberOrUndefined(
+        textValue(period, "probability_of_precipitation"),
+      ),
+      amount: {
+        min: rainRange?.min,
+        max: rainRange?.max,
+        units: "mm",
+      },
+    },
+    fire_danger_category: { text: textValue(period, "fire_danger") },
+  };
+}
+
+function parseWarningsXml(xml: string, state: string): Warning[] {
+  const title = tagText(xml, "warning-title") ?? tagText(xml, "headline");
+  if (!title) return [];
+  return [
+    {
+      id: tagText(xml, "identifier"),
+      issue_time: tagText(xml, "issue-time-utc"),
+      expiry_time: tagText(xml, "expiry-time"),
+      state,
+      title,
+      short_title: title,
+      phase: tagText(xml, "phase"),
+      type: tagText(xml, "warning-type"),
+    },
+  ];
+}
+
+function findAreaByCode(xml: string, areaCode: string) {
+  const escaped = areaCode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return xml.match(
+    new RegExp(`<area\\b(?=[^>]*\\baac="${escaped}")[\\s\\S]*?<\\/area>`),
+  )?.[0];
+}
+
+function tagText(xml: string, tag: string) {
+  return decodeXml(
+    xml.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`))?.[1],
+  );
+}
+
+function elementText(xml: string, type: string) {
+  return typedTagText(xml, "element", type);
+}
+
+function textValue(xml: string, type: string) {
+  return typedTagText(xml, "text", type);
+}
+
+function typedTagText(xml: string, tag: string, type: string) {
+  const escaped = type.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return decodeXml(
+    xml.match(
+      new RegExp(
+        `<${tag}\\b(?=[^>]*\\btype="${escaped}")[^>]*>([\\s\\S]*?)<\\/${tag}>`,
+      ),
+    )?.[1],
+  );
+}
+
+function attr(xml: string, name: string) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return decodeXml(xml.match(new RegExp(`\\b${escaped}="([^"]*)"`))?.[1]);
+}
+
+function decodeXml(value?: string) {
+  return value
+    ?.replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+}
+
+function numberOrUndefined(value?: string) {
+  if (!value) return undefined;
+  const match = value.match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : undefined;
+}
+
+function parseRainRange(value?: string) {
+  if (!value) return undefined;
+  const numbers = [...value.matchAll(/\d+(?:\.\d+)?/g)].map((match) =>
+    Number(match[0]),
+  );
+  if (numbers.length === 0) return undefined;
+  return { min: numbers[0], max: numbers[numbers.length - 1] };
+}
+
+function stripTrailingFullStop(value?: string) {
+  return value?.replace(/\.$/, "");
+}
+
+function iconDescriptorForCode(value?: string) {
+  switch (value) {
+    case "1":
+      return "sunny";
+    case "2":
+    case "3":
+      return "partly_cloudy";
+    case "4":
+    case "6":
+      return "cloudy";
+    case "8":
+    case "9":
+    case "10":
+    case "11":
+      return "shower";
+    case "12":
+      return "rain";
+    case "13":
+    case "14":
+    case "15":
+      return "storm";
+    default:
+      return undefined;
+  }
+}
+
+function fetchDaily(
+  location: DocumentedForecastLocation,
+  options: FetchOptions,
+) {
   return fetchCachedResponse<DailyForecast>(
-    `weather-${geohash}-daily.json`,
+    `weather-${location.productId}-${location.areaCode}-daily.json`,
     DAILY_TTL_MS,
-    `${BASE_URL}/${geohash}/forecasts/daily`,
+    `${FWO_BASE_URL}/${location.productId}.xml`,
+    (xml) => parseForecastXml(xml, location),
     options,
   );
 }
 
-function fetchWarnings(geohash: string, options: FetchOptions = {}) {
-  return fetchCachedResponse<{ data: Warning[] }>(
-    `weather-${geohash}-warnings.json`,
+function fetchWarnings(
+  location: DocumentedForecastLocation,
+  options: FetchOptions = {},
+) {
+  return fetchCachedResponse<Warning[]>(
+    `weather-${location.state.toLowerCase()}-warnings.json`,
     WARNINGS_TTL_MS,
-    `${BASE_URL}/${geohash}/warnings`,
+    `${FWO_BASE_URL}/ID${location.state[0]}21037.xml`,
+    (xml) => parseWarningsXml(xml, location.state),
     options,
-  ).then((response) => response.data ?? []);
+  ).catch(() => []);
 }
 
 async function fetchCachedResponse<T>(
   name: string,
   ttlMs: number,
   url: string,
+  parse: (body: string) => T,
   options: FetchOptions = {},
 ): Promise<T> {
   const path = join(weatherCacheDir(), name);
@@ -445,7 +623,7 @@ async function fetchCachedResponse<T>(
   const stale = readJsonFile<T>(path, isAnyValue);
 
   try {
-    const value = await httpGetJson<T>(url);
+    const value = parse(await httpGetText(url));
     writeJsonFile(path, value);
     return value;
   } catch (error) {
@@ -454,7 +632,7 @@ async function fetchCachedResponse<T>(
   }
 }
 
-function httpGetJson<T>(url: string): Promise<T> {
+function httpGetText(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const request = get(
       url,
@@ -468,13 +646,9 @@ function httpGetJson<T>(url: string): Promise<T> {
 
         const chunks: Buffer[] = [];
         response.on("data", (chunk: Buffer) => chunks.push(chunk));
-        response.on("end", () => {
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")) as T);
-          } catch (error) {
-            reject(error);
-          }
-        });
+        response.on("end", () =>
+          resolve(Buffer.concat(chunks).toString("utf8")),
+        );
       },
     );
 
@@ -491,6 +665,7 @@ function weatherCacheDir() {
 
 export function normalizeGeohash(value: string) {
   const trimmed = value.trim();
+  if (trimmed.startsWith("bom-")) return trimmed;
   const parts = trimmed.split("-");
   return parts[parts.length - 1].slice(0, 6);
 }
