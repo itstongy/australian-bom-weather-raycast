@@ -65,7 +65,7 @@ test("radar loop progress resets at the first frame and fills at the last", () =
   );
   assert.deepEqual(
     [...last.data.subarray(1_300 * 4, 1_300 * 4 + 4)],
-    [255, 255, 255, 255],
+    [255, 59, 48, 255],
   );
 });
 

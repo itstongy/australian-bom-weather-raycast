@@ -13,7 +13,7 @@ import { downloadFrame, latestFrameTimeMs, scrapeFrames } from "./frames";
 import { httpGetBuffer } from "./http";
 import { RadarProduct, RadarUnavailableError, RenderResult } from "./types";
 
-const RADAR_GIF_CACHE_VERSION = 2;
+const RADAR_GIF_CACHE_VERSION = 3;
 
 export async function renderRadarLoop(
   product: RadarProduct,
@@ -127,7 +127,7 @@ export function addLoopProgressBar(
       blendPixel(frame.data, offset, 0, 0, 0, 180);
 
       if (y >= fillTop && y < fillTop + fillHeight && x < fillWidth) {
-        blendPixel(frame.data, offset, 255, 255, 255, 255);
+        blendPixel(frame.data, offset, 255, 59, 48, 255);
       }
     }
   }
