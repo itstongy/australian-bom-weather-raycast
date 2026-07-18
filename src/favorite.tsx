@@ -27,7 +27,7 @@ export default function Command() {
 
   if (state.status === "loading")
     return (
-      <Detail isLoading markdown="# Favorite Radar\n\nLoading favorite..." />
+      <Detail isLoading markdown={"# Favorite Radar\n\nLoading favorite..."} />
     );
   if (state.status === "error")
     return <ErrorDetail title="Favorite Radar" message={state.message} />;

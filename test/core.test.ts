@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PNG } from "pngjs";
 import { groupRadarSites } from "../src/bom/catalog";
-import { baseOverlayProductId } from "../src/bom/render";
+import { addLoopProgressBar, baseOverlayProductId } from "../src/bom/render";
 import { isRadarFrame } from "../src/bom/types";
 import { selectDefaultLocation } from "../src/location-selection";
 import { radarImageMarkdown } from "../src/radar-markdown";
@@ -37,6 +38,35 @@ test("radar overlay fallback maps specific products to base overlay product", ()
   assert.equal(baseOverlayProductId("IDR661"), "IDR663");
   assert.equal(baseOverlayProductId("IDR663"), "IDR663");
   assert.equal(baseOverlayProductId("IDR999"), null);
+});
+
+test("radar loop progress resets at the first frame and fills at the last", () => {
+  const first = new PNG({ width: 100, height: 100 });
+  const last = new PNG({ width: 100, height: 100 });
+  first.data.fill(255);
+  last.data.fill(255);
+
+  addLoopProgressBar(first, 0, 7);
+  addLoopProgressBar(last, 6, 7);
+
+  assert.deepEqual([...first.data.subarray(0, 4)], [255, 255, 255, 255]);
+  assert.deepEqual([...last.data.subarray(0, 4)], [255, 255, 255, 255]);
+  assert.deepEqual(
+    [...first.data.subarray(1_200 * 4, 1_200 * 4 + 4)],
+    [75, 75, 75, 255],
+  );
+  assert.deepEqual(
+    [...last.data.subarray(1_200 * 4, 1_200 * 4 + 4)],
+    [75, 75, 75, 255],
+  );
+  assert.deepEqual(
+    [...first.data.subarray(1_300 * 4, 1_300 * 4 + 4)],
+    [75, 75, 75, 255],
+  );
+  assert.deepEqual(
+    [...last.data.subarray(1_300 * 4, 1_300 * 4 + 4)],
+    [255, 255, 255, 255],
+  );
 });
 
 test("radar frame validation rejects malformed BoM cache payloads", () => {

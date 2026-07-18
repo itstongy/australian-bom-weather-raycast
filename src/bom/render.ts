@@ -13,6 +13,8 @@ import { downloadFrame, latestFrameTimeMs, scrapeFrames } from "./frames";
 import { httpGetBuffer } from "./http";
 import { RadarProduct, RadarUnavailableError, RenderResult } from "./types";
 
+const RADAR_GIF_CACHE_VERSION = 2;
+
 export async function renderRadarLoop(
   product: RadarProduct,
   frameCount: number,
@@ -45,7 +47,7 @@ export async function renderRadarLoop(
     cacheDir(),
     "gifs",
     product.id,
-    `${frameCount}-${hashString(cacheKey)}.gif`,
+    `v${RADAR_GIF_CACHE_VERSION}-${frameCount}-${hashString(cacheKey)}.gif`,
   );
   if (isFresh(gifPath, GIF_TTL_MS)) {
     return {
@@ -83,7 +85,7 @@ async function renderFramesWithOverlays(
   const overlays = await loadOverlays(product.id);
   const rendered: PNG[] = [];
 
-  for (const framePath of framePaths) {
+  for (const [frameIndex, framePath] of framePaths.entries()) {
     const radar = PNG.sync.read(readFileSync(framePath));
     const out = new PNG({ width: radar.width, height: radar.height });
     out.data.fill(0);
@@ -94,10 +96,41 @@ async function renderFramesWithOverlays(
     if (overlays.locations && sameSize(overlays.locations, out))
       alphaOver(out, overlays.locations);
 
+    addLoopProgressBar(out, frameIndex, framePaths.length);
     rendered.push(out);
   }
 
   return rendered;
+}
+
+export function addLoopProgressBar(
+  frame: PNG,
+  frameIndex: number,
+  frameCount: number,
+) {
+  const trackHeight = Math.max(4, Math.round(frame.height * 0.014));
+  const trackTop = Math.max(
+    0,
+    Math.min(
+      frame.height - trackHeight,
+      Math.max(12, Math.round(frame.height * 0.03)),
+    ),
+  );
+  const fillHeight = Math.max(2, Math.round(trackHeight * 0.55));
+  const fillTop = Math.floor((trackHeight - fillHeight) / 2);
+  const progress = frameCount <= 1 ? 1 : frameIndex / (frameCount - 1);
+  const fillWidth = Math.round(frame.width * progress);
+
+  for (let y = 0; y < trackHeight; y++) {
+    for (let x = 0; x < frame.width; x++) {
+      const offset = ((trackTop + y) * frame.width + x) * 4;
+      blendPixel(frame.data, offset, 0, 0, 0, 180);
+
+      if (y >= fillTop && y < fillTop + fillHeight && x < fillWidth) {
+        blendPixel(frame.data, offset, 255, 255, 255, 255);
+      }
+    }
+  }
 }
 
 function writeGif(path: string, frames: PNG[]) {
@@ -174,6 +207,35 @@ function alphaOver(dst: PNG, src: PNG) {
     dst.data[i + 2] = Math.round((sb * sa + db * da * (1 - sa)) / (outA || 1));
     dst.data[i + 3] = Math.round(outA * 255);
   }
+}
+
+function blendPixel(
+  data: Buffer,
+  offset: number,
+  red: number,
+  green: number,
+  blue: number,
+  alpha: number,
+) {
+  const sourceAlpha = alpha / 255;
+  const destinationAlpha = data[offset + 3] / 255;
+  const outputAlpha = sourceAlpha + destinationAlpha * (1 - sourceAlpha);
+
+  data[offset] = Math.round(
+    (red * sourceAlpha + data[offset] * destinationAlpha * (1 - sourceAlpha)) /
+      (outputAlpha || 1),
+  );
+  data[offset + 1] = Math.round(
+    (green * sourceAlpha +
+      data[offset + 1] * destinationAlpha * (1 - sourceAlpha)) /
+      (outputAlpha || 1),
+  );
+  data[offset + 2] = Math.round(
+    (blue * sourceAlpha +
+      data[offset + 2] * destinationAlpha * (1 - sourceAlpha)) /
+      (outputAlpha || 1),
+  );
+  data[offset + 3] = Math.round(outputAlpha * 255);
 }
 
 function overlayProductIds(productId: string) {
