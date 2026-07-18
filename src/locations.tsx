@@ -9,8 +9,9 @@ import {
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import { attributionMarkdown } from "./attribution";
+import { createLocationSearchLifecycle } from "./location-search-lifecycle";
 import {
-  getSavedLocations,
+  getLocationState,
   removeLocation,
   saveLocation,
   setDefaultLocation,
@@ -29,7 +30,14 @@ type State = {
   results: LocationSearchResult[];
   isLoadingSaved: boolean;
   isLoadingSearch: boolean;
+  defaultGeohash?: string;
+  searchError?: string;
 };
+
+type LocationChange = (change: {
+  saved?: WeatherLocation[];
+  defaultGeohash?: string | null;
+}) => void;
 
 export default function Command() {
   const [state, setState] = useState<State>({
@@ -41,11 +49,19 @@ export default function Command() {
   const [query, setQuery] = useState("");
 
   useEffect(() => {
-    getSavedLocations()
-      .then((saved) =>
-        setState((current) => ({ ...current, saved, isLoadingSaved: false })),
-      )
+    let active = true;
+    getLocationState()
+      .then(({ saved, defaultGeohash }) => {
+        if (!active) return;
+        setState((current) => ({
+          ...current,
+          saved,
+          defaultGeohash,
+          isLoadingSaved: false,
+        }));
+      })
       .catch(async (error) => {
+        if (!active) return;
         setState((current) => ({
           ...current,
           saved: [],
@@ -57,43 +73,25 @@ export default function Command() {
           message: error instanceof Error ? error.message : String(error),
         });
       });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const timeout = setTimeout(() => {
-      if (query.trim().length < 2) {
-        setState((current) => ({
-          ...current,
-          results: [],
-          isLoadingSearch: false,
-        }));
-        return;
-      }
-      setState((current) => ({ ...current, isLoadingSearch: true }));
-      searchLocations(query)
-        .then((results) => {
-          if (!cancelled)
-            setState((current) => ({
-              ...current,
-              results,
-              isLoadingSearch: false,
-            }));
-        })
-        .catch(() => {
-          if (!cancelled)
-            setState((current) => ({
-              ...current,
-              results: [],
-              isLoadingSearch: false,
-            }));
-        });
-    }, 250);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timeout);
-    };
+    const lifecycle = createLocationSearchLifecycle({
+      search: searchLocations,
+      update: (searchState) =>
+        setState((current) => ({ ...current, ...searchState })),
+      reportError: (searchedQuery, message) =>
+        showToast({
+          style: Toast.Style.Failure,
+          title: `Could not search for “${searchedQuery}”`,
+          message,
+        }).then(() => undefined),
+    });
+    lifecycle.replace(query);
+    return lifecycle.dispose;
   }, [query]);
 
   return (
@@ -113,12 +111,29 @@ export default function Command() {
               subtitle={[location.state, location.postcode]
                 .filter(Boolean)
                 .join(" ")}
-              accessories={[{ text: location.geohash }]}
+              icon={
+                state.defaultGeohash === location.geohash ? Icon.Star : Icon.Pin
+              }
+              accessories={[
+                ...(state.defaultGeohash === location.geohash
+                  ? [{ text: "Default", icon: Icon.Star }]
+                  : []),
+                { text: location.geohash },
+              ]}
               actions={
                 <SavedLocationActions
                   location={location}
-                  onChange={(saved) =>
-                    setState((current) => ({ ...current, saved }))
+                  isDefault={state.defaultGeohash === location.geohash}
+                  onChange={(change) =>
+                    setState((current) => ({
+                      ...current,
+                      ...(change.saved ? { saved: change.saved } : {}),
+                      ...(change.defaultGeohash !== undefined
+                        ? {
+                            defaultGeohash: change.defaultGeohash ?? undefined,
+                          }
+                        : {}),
+                    }))
                   }
                 />
               }
@@ -143,14 +158,29 @@ export default function Command() {
             actions={
               <SearchResultActions
                 result={result}
-                onChange={(saved) =>
-                  setState((current) => ({ ...current, saved }))
+                onChange={(change) =>
+                  setState((current) => ({
+                    ...current,
+                    ...(change.saved ? { saved: change.saved } : {}),
+                    ...(change.defaultGeohash !== undefined
+                      ? {
+                          defaultGeohash: change.defaultGeohash ?? undefined,
+                        }
+                      : {}),
+                  }))
                 }
               />
             }
           />
         ))}
       </List.Section>
+      {state.searchError && (
+        <List.EmptyView
+          title="Location Search Failed"
+          description={state.searchError}
+          icon={Icon.Warning}
+        />
+      )}
     </List>
   );
 }
@@ -160,7 +190,7 @@ function SearchResultActions({
   onChange,
 }: {
   result: LocationSearchResult;
-  onChange: (saved: WeatherLocation[]) => void;
+  onChange: LocationChange;
 }) {
   const location: WeatherLocation = {
     geohash: result.geohash,
@@ -176,12 +206,14 @@ function SearchResultActions({
         title="Save Location"
         icon={Icon.Plus}
         onAction={async () => {
-          await saveLocation(location);
-          onChange(await getSavedLocations());
-          await showToast({
-            style: Toast.Style.Success,
-            title: "Saved location",
-            message: result.name,
+          await runLocationAction("Save location", async () => {
+            const locationState = await saveLocation(location);
+            onChange(locationState);
+            await showToast({
+              style: Toast.Style.Success,
+              title: "Saved location",
+              message: result.name,
+            });
           });
         }}
       />
@@ -189,12 +221,14 @@ function SearchResultActions({
         title="Save and Set as Default"
         icon={Icon.Star}
         onAction={async () => {
-          await saveLocation(location, true);
-          onChange(await getSavedLocations());
-          await showToast({
-            style: Toast.Style.Success,
-            title: "Default location set",
-            message: result.name,
+          await runLocationAction("Set default location", async () => {
+            const locationState = await saveLocation(location, true);
+            onChange(locationState);
+            await showToast({
+              style: Toast.Style.Success,
+              title: "Default location set",
+              message: result.name,
+            });
           });
         }}
       />
@@ -209,36 +243,48 @@ function SearchResultActions({
 
 function SavedLocationActions({
   location,
+  isDefault,
   onChange,
 }: {
   location: WeatherLocation;
-  onChange: (saved: WeatherLocation[]) => void;
+  isDefault: boolean;
+  onChange: LocationChange;
 }) {
   return (
     <ActionPanel>
-      <Action
-        title="Set as Default"
-        icon={Icon.Star}
-        onAction={async () => {
-          await setDefaultLocation(location);
-          await showToast({
-            style: Toast.Style.Success,
-            title: "Default location set",
-            message: location.name,
-          });
-        }}
-      />
+      {!isDefault && (
+        <Action
+          title="Set as Default"
+          icon={Icon.Star}
+          onAction={async () => {
+            await runLocationAction("Set default location", async () => {
+              const locationState = await setDefaultLocation(location);
+              onChange(locationState);
+              await showToast({
+                style: Toast.Style.Success,
+                title: "Default location set",
+                message: location.name,
+              });
+            });
+          }}
+        />
+      )}
       <Action
         title="Remove Location"
         icon={Icon.Trash}
         style={Action.Style.Destructive}
         onAction={async () => {
-          await removeLocation(location);
-          onChange(await getSavedLocations());
-          await showToast({
-            style: Toast.Style.Success,
-            title: "Removed location",
-            message: location.name,
+          await runLocationAction("Remove location", async () => {
+            const locationState = await removeLocation(location);
+            onChange({
+              saved: locationState.saved,
+              defaultGeohash: locationState.defaultGeohash ?? null,
+            });
+            await showToast({
+              style: Toast.Style.Success,
+              title: "Removed location",
+              message: location.name,
+            });
           });
         }}
       />
@@ -253,4 +299,16 @@ function SavedLocationActions({
 
 function TermsDetail() {
   return <Detail markdown={attributionMarkdown()} />;
+}
+
+async function runLocationAction(title: string, action: () => Promise<void>) {
+  try {
+    await action();
+  } catch (error) {
+    await showToast({
+      style: Toast.Style.Failure,
+      title: `${title} failed`,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }

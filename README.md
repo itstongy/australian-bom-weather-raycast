@@ -138,12 +138,18 @@ The extension caches data to avoid repeated requests and to stay aligned with no
 - Radar site/product catalogue: 7 days
 - Radar frame index: 3 minutes
 - Rendered radar GIFs: 3 minutes
-- Observations: 10 minutes
-- Hourly forecast: 30 minutes
-- Daily forecast: 1 hour
-- Warnings: 30 minutes
+- Raw radar frames: up to 6 hours and 48 files per product
+- Rendered radar GIF retention: up to 2 hours and 8 files per product
+- Observations: fresh for 10 minutes; failed refreshes may use clearly labelled stale data up to 60 minutes old
+- Hourly forecast: fresh for 30 minutes; failed refreshes may use clearly labelled stale data up to 6 hours old
+- Daily forecast: fresh for 1 hour; failed refreshes may use clearly labelled stale data up to 24 hours old
+- Warnings: fresh for 5 minutes; failed refreshes may use clearly labelled stale data up to 30 minutes old
 
-These cache windows are intentionally conservative for an interactive personal-use extension. They should be revisited before any public or commercial distribution.
+The fresh TTL is the point at which the extension asks BoM for an update. The separate maximum-stale limit is a hard fallback ceiling: after a failed request, older cached data is marked unavailable and is not displayed as weather. Cache age is checked when the request actually fails, so a slow failure cannot cross the limit unnoticed. The UI labels cached data with its age and whether it is fresh, stale, or unavailable.
+
+Fresh radar loops are reused during their three-minute window, so reopening a loop after a few seconds does not download and render it again. Older radar files are pruned periodically from the extension's support cache; the operating-system temporary directory is not used because it can be cleared unpredictably between launches.
+
+These cache windows and retention limits are intentionally conservative for an interactive personal-use extension. They should be revisited before any public or commercial distribution.
 
 ## Troubleshooting
 

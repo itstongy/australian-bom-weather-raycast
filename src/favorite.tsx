@@ -1,6 +1,7 @@
 import { Detail, List } from "@raycast/api";
 import { useEffect, useState } from "react";
 import { ErrorDetail, RadarLoop } from "./radar";
+import { startRadarCatalogLoadLifecycle } from "./radar-catalog-lifecycle";
 import { loadReadyCatalog, ReadyCatalog } from "./radar-state";
 import { configureRuntime } from "./runtime";
 
@@ -15,14 +16,16 @@ export default function Command() {
   const [state, setState] = useState<State>({ status: "loading" });
 
   useEffect(() => {
-    loadReadyCatalog()
-      .then((catalog) => setState({ status: "ready", catalog }))
-      .catch((error) =>
+    const lifecycle = startRadarCatalogLoadLifecycle({
+      load: loadReadyCatalog,
+      onReady: (catalog) => setState({ status: "ready", catalog }),
+      onError: (error) =>
         setState({
           status: "error",
           message: error instanceof Error ? error.message : String(error),
         }),
-      );
+    });
+    return lifecycle.cancel;
   }, []);
 
   if (state.status === "loading")

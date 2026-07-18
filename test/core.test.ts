@@ -70,21 +70,34 @@ test("radar loop progress resets at the first frame and fills at the last", () =
 });
 
 test("radar frame validation rejects malformed BoM cache payloads", () => {
-  assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png" }), true);
-  assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: null }), false);
-  assert.equal(isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png", timestamp: null }), false);
+  assert.equal(
+    isRadarFrame({ url: "https://example.com/frame.png", file: "frame.png" }),
+    true,
+  );
+  assert.equal(
+    isRadarFrame({ url: "https://example.com/frame.png", file: null }),
+    false,
+  );
+  assert.equal(
+    isRadarFrame({
+      url: "https://example.com/frame.png",
+      file: "frame.png",
+      timestamp: null,
+    }),
+    false,
+  );
 });
 
 test("radar image markdown uses an encoded file URL for Raycast detail images", () => {
   const markdown = radarImageMarkdown({
     alt: "IDR664 radar loop",
-    path: "/Users/tongy/Library/Application Support/com.raycast-x.macos/extensions/australian-bom-weather/cache/gifs/IDR664/10-abc.gif",
+    path: "/tmp/Raycast Weather/cache/gifs/IDR664/10-abc.gif",
     size: 430,
   });
 
   assert.equal(
     markdown,
-    "![IDR664 radar loop](file:///Users/tongy/Library/Application%20Support/com.raycast-x.macos/extensions/australian-bom-weather/cache/gifs/IDR664/10-abc.gif?raycast-width=430&raycast-height=430)",
+    "![IDR664 radar loop](file:///tmp/Raycast%20Weather/cache/gifs/IDR664/10-abc.gif?raycast-width=430&raycast-height=430)",
   );
 });
 
@@ -194,5 +207,12 @@ function weatherBundle(): WeatherBundle {
       ],
     },
     warnings: [],
+    sources: {
+      observation: { status: "fresh", source: "network", ageMs: 0 },
+      hourly: { status: "fresh", source: "network", ageMs: 0 },
+      daily: { status: "fresh", source: "network", ageMs: 0 },
+      warnings: { status: "fresh", source: "network", ageMs: 0 },
+    },
+    expiredWarningCount: 0,
   };
 }

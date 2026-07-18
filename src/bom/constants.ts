@@ -8,6 +8,7 @@ export const FRAME_INDEX_TTL_MS = 3 * 60 * 1000;
 export const GIF_TTL_MS = 3 * 60 * 1000;
 export const GIF_FRAME_DELAY_MS = 700;
 export const RADAR_STALE_AFTER_MS = 20 * 60 * 1000;
+export const RADAR_GIF_CACHE_VERSION = 3;
 
 export const STATES = ["nsw", "vic", "qld", "wa", "sa", "tas", "nt"] as const;
 

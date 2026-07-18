@@ -9,14 +9,22 @@ import {
   showToast,
   Toast,
 } from "@raycast/api";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { attributionMarkdown } from "./attribution";
+import {
+  createLatestRequestLifecycle,
+  isAbortError,
+  LatestRequestLifecycle,
+} from "./latest-request-lifecycle";
 import { getDefaultLocation, getSavedLocations } from "./location-store";
 import { configureRuntime } from "./runtime";
 import {
   fetchWarningsForLocation,
+  fetchWarningDetail,
   Warning,
   WeatherLocation,
+  WarningsResult,
+  weatherDataLabel,
   warningMarkdown,
   warningSubtitle,
   warningTitle,
@@ -30,23 +38,78 @@ type State =
       status: "ready";
       location: WeatherLocation;
       locations: WeatherLocation[];
-      warnings: Warning[];
+      result: WarningsResult;
     }
   | { status: "error"; message: string };
 
+type WarningsLoadReason = "initial" | "switch" | "refresh";
+type RequestWarnings = (
+  location: WeatherLocation | undefined,
+  reason: WarningsLoadReason,
+) => void;
+
 export default function Command() {
   const [state, setState] = useState<State>({ status: "loading" });
+  const lifecycleRef = useRef<LatestRequestLifecycle | null>(null);
+  if (!lifecycleRef.current) {
+    lifecycleRef.current = createLatestRequestLifecycle();
+  }
+  const lifecycle = lifecycleRef.current;
+
+  const requestWarnings = useCallback<RequestWarnings>(
+    (location, reason) => {
+      void lifecycle.run(
+        (signal) =>
+          loadWarnings(location, {
+            forceRefresh: reason === "refresh",
+            signal,
+          }),
+        {
+          onSuccess: (nextState) => {
+            setState(nextState);
+            if (reason === "refresh") {
+              void showToast(
+                nextState.result.meta.source === "network"
+                  ? {
+                      style: Toast.Style.Success,
+                      title: "Warnings refreshed",
+                    }
+                  : {
+                      style: Toast.Style.Failure,
+                      title: "Could not refresh warnings",
+                      message:
+                        nextState.result.meta.error ??
+                        "BoM could not be reached; cached warnings are shown.",
+                    },
+              );
+            }
+          },
+          onError: (error) => {
+            if (reason === "initial") {
+              setState({ status: "error", message: errorMessage(error) });
+              return;
+            }
+            void showToast({
+              style: Toast.Style.Failure,
+              title:
+                reason === "refresh"
+                  ? "Could not refresh warnings"
+                  : "Could not load warnings",
+              message: errorMessage(error),
+            });
+          },
+        },
+      );
+    },
+    [lifecycle],
+  );
 
   useEffect(() => {
-    loadWarnings()
-      .then(setState)
-      .catch((error) =>
-        setState({
-          status: "error",
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-  }, []);
+    requestWarnings(undefined, "initial");
+    return () => {
+      lifecycle.dispose();
+    };
+  }, [lifecycle, requestWarnings]);
 
   if (state.status === "loading")
     return <List isLoading searchBarPlaceholder="Loading BoM warnings..." />;
@@ -57,33 +120,43 @@ export default function Command() {
       />
     );
 
-  return <WarningsList state={state} onChange={setState} />;
+  return <WarningsList state={state} onRequest={requestWarnings} />;
 }
 
 async function loadWarnings(
   location?: WeatherLocation,
-  options: { forceRefresh?: boolean } = {},
+  options: { forceRefresh?: boolean; signal?: AbortSignal } = {},
 ): Promise<Extract<State, { status: "ready" }>> {
   const locations = await getSavedLocations();
+  options.signal?.throwIfAborted();
   const selected = location ?? (await getDefaultLocation());
+  options.signal?.throwIfAborted();
   if (!selected) {
     return {
       status: "ready",
       location: { geohash: "", name: "No Location" },
       locations,
-      warnings: [],
+      result: {
+        warnings: [],
+        meta: {
+          status: "unavailable",
+          source: "none",
+          error: "No weather location is configured.",
+        },
+        expiredCount: 0,
+      },
     };
   }
-  const warnings = await fetchWarningsForLocation(selected, options);
-  return { status: "ready", location: selected, locations, warnings };
+  const result = await fetchWarningsForLocation(selected, options);
+  return { status: "ready", location: selected, locations, result };
 }
 
 function WarningsList({
   state,
-  onChange,
+  onRequest,
 }: {
   state: Extract<State, { status: "ready" }>;
-  onChange: (state: State) => void;
+  onRequest: RequestWarnings;
 }) {
   if (!state.location.geohash) {
     return (
@@ -115,18 +188,39 @@ function WarningsList({
     );
   }
 
-  if (state.warnings.length === 0) {
+  const { warnings, meta, expiredCount } = state.result;
+
+  if (meta.status !== "fresh" && warnings.length === 0) {
+    return (
+      <List navigationTitle={`${state.location.name} Warnings`}>
+        <List.EmptyView
+          title="Could Not Verify Current Warnings"
+          description={`BoM warnings are ${weatherDataLabel(meta).toLowerCase()}. ${meta.error ?? "Refresh to try again."}`}
+          icon={Icon.ExclamationMark}
+        />
+        <List.Item
+          title="Current warnings are unverified"
+          subtitle={`${weatherDataLabel(meta)}${meta.error ? ` · ${meta.error}` : ""}`}
+          icon={Icon.ExclamationMark}
+          actions={<WarningsActions state={state} onRequest={onRequest} />}
+        />
+      </List>
+    );
+  }
+
+  if (warnings.length === 0) {
     return (
       <List navigationTitle={`${state.location.name} Warnings`}>
         <List.EmptyView
           title="No Current Warnings"
-          description={`No BoM warnings for ${state.location.name}.`}
+          description={`BoM reported no current warnings for ${state.location.name} (${weatherDataLabel(meta).toLowerCase()}).${expiredCount ? ` ${expiredCount} expired warning${expiredCount === 1 ? " was" : "s were"} hidden.` : ""}`}
         />
         <List.Item
           title="No current warnings"
           subtitle={state.location.name}
           icon={Icon.CheckCircle}
-          actions={<WarningsActions state={state} onChange={onChange} />}
+          accessories={[{ text: weatherDataLabel(meta) }]}
+          actions={<WarningsActions state={state} onRequest={onRequest} />}
         />
       </List>
     );
@@ -138,9 +232,10 @@ function WarningsList({
       searchBarPlaceholder="Search warnings"
     >
       <List.Section
-        title={`${state.warnings.length} Current Warning${state.warnings.length === 1 ? "" : "s"}`}
+        title={`${meta.status === "stale" ? "Last Known" : "Current"} Warning${warnings.length === 1 ? "" : "s"} · ${weatherDataLabel(meta)}`}
+        subtitle={expiredCount ? `${expiredCount} expired hidden` : undefined}
       >
-        {state.warnings.map((warning) => (
+        {warnings.map((warning) => (
           <List.Item
             key={warning.id ?? warningTitle(warning)}
             title={warningTitle(warning)}
@@ -157,7 +252,7 @@ function WarningsList({
                   icon={Icon.Sidebar}
                   target={<WarningDetail warning={warning} />}
                 />
-                <WarningsActions state={state} onChange={onChange} />
+                <WarningsActions state={state} onRequest={onRequest} />
               </ActionPanel>
             }
           />
@@ -169,10 +264,10 @@ function WarningsList({
 
 function WarningsActions({
   state,
-  onChange,
+  onRequest,
 }: {
   state: Extract<State, { status: "ready" }>;
-  onChange: (state: State) => void;
+  onRequest: RequestWarnings;
 }) {
   return (
     <>
@@ -181,45 +276,62 @@ function WarningsActions({
           <Action
             key={location.geohash}
             title={location.name}
-            onAction={async () => {
-              try {
-                onChange(await loadWarnings(location));
-              } catch (error) {
-                await showToast({
-                  style: Toast.Style.Failure,
-                  title: "Could not load warnings",
-                  message: errorMessage(error),
-                });
-              }
-            }}
+            onAction={() => onRequest(location, "switch")}
           />
         ))}
       </ActionPanel.Submenu>
       <Action
         title="Refresh Warnings"
         icon={Icon.ArrowClockwise}
-        onAction={async () => {
-          try {
-            onChange(
-              await loadWarnings(state.location, { forceRefresh: true }),
-            );
-          } catch (error) {
-            await showToast({
-              style: Toast.Style.Failure,
-              title: "Could not refresh warnings",
-              message: errorMessage(error),
-            });
-          }
-        }}
+        onAction={() => onRequest(state.location, "refresh")}
       />
     </>
   );
 }
 
 function WarningDetail({ warning }: { warning: Warning }) {
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "ready"; warning: Warning; label: string }
+    | { status: "error"; message: string }
+  >({ status: "loading" });
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    fetchWarningDetail(warning, { signal: controller.signal })
+      .then(
+        (result) =>
+          active &&
+          setState({
+            status: "ready",
+            warning: result.warning,
+            label: weatherDataLabel(result.meta),
+          }),
+      )
+      .catch((error) => {
+        if (active && !isAbortError(error))
+          setState({ status: "error", message: errorMessage(error) });
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [warning.id]);
+
+  if (state.status === "loading") {
+    return <Detail isLoading markdown="# Loading Warning Details…" />;
+  }
+  if (state.status === "error") {
+    return (
+      <Detail
+        markdown={`${warningMarkdown(warning)}\n\n> **Could not load the full warning message:** ${state.message}\n\n${attributionMarkdown()}`}
+      />
+    );
+  }
   return (
     <Detail
-      markdown={`${warningMarkdown(warning)}\n\n${attributionMarkdown()}`}
+      markdown={`${warningMarkdown(state.warning)}\n\n_Detail data: ${state.label}_\n\n${attributionMarkdown()}`}
     />
   );
 }

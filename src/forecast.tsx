@@ -9,8 +9,12 @@ import {
   showToast,
   Toast,
 } from "@raycast/api";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { attributionMarkdown } from "./attribution";
+import {
+  createLatestRequestLifecycle,
+  LatestRequestLifecycle,
+} from "./latest-request-lifecycle";
 import {
   getDefaultLocation,
   getSavedLocations,
@@ -19,10 +23,14 @@ import {
 import { configureRuntime } from "./runtime";
 import {
   fetchWeatherBundle,
+  forcedWeatherRefreshSucceeded,
   formatDay,
   formatHour,
+  currentWeatherMeta,
+  currentWeatherFeedMeta,
   iconForDescriptor,
   summarizeCurrentWeather,
+  weatherDataLabel,
   WeatherLocation,
   WeatherBundle,
 } from "./weather";
@@ -35,26 +43,90 @@ type State =
   | { status: "forecast"; bundle: WeatherBundle; locations: WeatherLocation[] }
   | { status: "error"; message: string };
 
+type ForecastLoadReason = "view" | "switch" | "refresh";
+type LoadForecast = (
+  location: WeatherLocation,
+  locations: WeatherLocation[],
+  reason: ForecastLoadReason,
+) => void;
+
 export default function Command() {
   const [state, setState] = useState<State>({ status: "loading" });
+  const lifecycleRef = useRef<LatestRequestLifecycle | null>(null);
+  if (!lifecycleRef.current) {
+    lifecycleRef.current = createLatestRequestLifecycle();
+  }
+  const lifecycle = lifecycleRef.current;
+
+  const loadForecast = useCallback<LoadForecast>(
+    (location, locations, reason) => {
+      void lifecycle.run(
+        (signal) =>
+          fetchWeatherBundle(location, {
+            forceRefresh: reason === "refresh",
+            signal,
+          }),
+        {
+          onSuccess: (bundle) => {
+            setState({ status: "forecast", bundle, locations });
+            if (reason === "refresh") {
+              void showToast(
+                forcedWeatherRefreshSucceeded(bundle)
+                  ? {
+                      style: Toast.Style.Success,
+                      title: "Forecast refreshed",
+                    }
+                  : {
+                      style: Toast.Style.Failure,
+                      title: "Could not refresh forecast",
+                      message:
+                        currentWeatherMeta(bundle).error ??
+                        "BoM could not be reached; cached weather is shown.",
+                    },
+              );
+            }
+          },
+          onError: (error) => {
+            void showToast({
+              style: Toast.Style.Failure,
+              title:
+                reason === "refresh"
+                  ? "Could not refresh forecast"
+                  : reason === "switch"
+                    ? "Could not switch location"
+                    : "Could not load forecast",
+              message: errorMessage(error),
+            });
+          },
+        },
+      );
+    },
+    [lifecycle],
+  );
 
   useEffect(() => {
-    Promise.all([getSavedLocations(), getDefaultLocation()])
-      .then(([locations, defaultLocation]) => {
-        if (defaultLocation) {
-          return fetchWeatherBundle(defaultLocation).then((bundle) =>
-            setState({ status: "forecast", bundle, locations }),
-          );
-        }
-        setState({ status: "locations", locations });
-      })
-      .catch((error) =>
-        setState({
-          status: "error",
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      );
-  }, []);
+    void lifecycle.run(
+      async (signal) => {
+        const [locations, defaultLocation] = await Promise.all([
+          getSavedLocations(),
+          getDefaultLocation(),
+        ]);
+        signal.throwIfAborted();
+        if (!defaultLocation)
+          return { status: "locations", locations } as State;
+        const bundle = await fetchWeatherBundle(defaultLocation, { signal });
+        return { status: "forecast", bundle, locations } as State;
+      },
+      {
+        onSuccess: setState,
+        onError: (error) =>
+          setState({ status: "error", message: errorMessage(error) }),
+      },
+    );
+    return () => {
+      lifecycle.dispose();
+    };
+  }, [lifecycle]);
 
   if (state.status === "loading")
     return <List isLoading searchBarPlaceholder="Loading saved locations..." />;
@@ -65,22 +137,27 @@ export default function Command() {
       />
     );
   if (state.status === "locations")
-    return <LocationPicker locations={state.locations} onPick={setState} />;
+    return (
+      <LocationPicker
+        locations={state.locations}
+        onLoadForecast={loadForecast}
+      />
+    );
   return (
     <ForecastList
       bundle={state.bundle}
       locations={state.locations}
-      onPick={setState}
+      onLoadForecast={loadForecast}
     />
   );
 }
 
 function LocationPicker({
   locations,
-  onPick,
+  onLoadForecast,
 }: {
   locations: WeatherLocation[];
-  onPick: (state: State) => void;
+  onLoadForecast: LoadForecast;
 }) {
   if (locations.length === 0) {
     return (
@@ -128,18 +205,7 @@ function LocationPicker({
                 <Action
                   title="View Forecast"
                   icon={Icon.Cloud}
-                  onAction={async () => {
-                    try {
-                      const bundle = await fetchWeatherBundle(location);
-                      onPick({ status: "forecast", bundle, locations });
-                    } catch (error) {
-                      await showToast({
-                        style: Toast.Style.Failure,
-                        title: "Could not load forecast",
-                        message: errorMessage(error),
-                      });
-                    }
-                  }}
+                  onAction={() => onLoadForecast(location, locations, "view")}
                 />
                 <Action
                   title="Set as Default"
@@ -170,14 +236,15 @@ function LocationPicker({
 function ForecastList({
   bundle,
   locations,
-  onPick,
+  onLoadForecast,
 }: {
   bundle: WeatherBundle;
   locations: WeatherLocation[];
-  onPick: (state: State) => void;
+  onLoadForecast: LoadForecast;
 }) {
   const current = summarizeCurrentWeather(bundle);
   const hours = bundle.hourly.data.slice(0, 18);
+  const currentMeta = currentWeatherMeta(bundle);
 
   return (
     <List
@@ -187,22 +254,59 @@ function ForecastList({
       <List.Section title="Current">
         <List.Item
           title={`${current.icon} ${current.shortText}`}
-          subtitle={`${Math.round(current.temp)}° · feels ${Math.round(current.feelsLike)}° · ${current.rainChance}% rain`}
+          subtitle={`${formatTemperature(current.temp)} · feels ${formatTemperature(current.feelsLike)} · ${formatRainChance(current.rainChance)} rain`}
           accessories={[
             { text: current.wind },
-            current.humidity ? { text: `${current.humidity}% RH` } : {},
+            current.humidity !== undefined
+              ? { text: `${current.humidity}% RH` }
+              : {},
+            currentMeta.status !== "fresh"
+              ? { text: weatherDataLabel(currentMeta) }
+              : {},
           ]}
           actions={
             <ForecastActions
               bundle={bundle}
               locations={locations}
-              onPick={onPick}
+              onLoadForecast={onLoadForecast}
             />
           }
         />
       </List.Section>
 
-      <List.Section title="Daily">
+      <List.Section title="Warnings">
+        <List.Item
+          title={warningSummaryTitle(bundle)}
+          subtitle={`${bundle.location.name} · ${weatherDataLabel(bundle.sources.warnings)}`}
+          icon={
+            bundle.warnings.length || bundle.sources.warnings.status !== "fresh"
+              ? Icon.ExclamationMark
+              : Icon.CheckCircle
+          }
+          actions={
+            <ForecastActions
+              bundle={bundle}
+              locations={locations}
+              onLoadForecast={onLoadForecast}
+            />
+          }
+        />
+      </List.Section>
+
+      <List.Section
+        title={`Daily · ${weatherDataLabel(bundle.sources.daily)}`}
+        subtitle={feedIssueSubtitle(bundle.sources.daily.issueTime)}
+      >
+        {bundle.daily.data.length === 0 && (
+          <List.Item
+            title="Daily forecast unavailable"
+            subtitle={
+              bundle.sources.daily.error ??
+              "No valid daily forecast was returned."
+            }
+            icon={Icon.ExclamationMark}
+          />
+        )}
         {bundle.daily.data.map((day) => {
           const formatted = formatDay(day);
           return (
@@ -215,7 +319,7 @@ function ForecastList({
                 <ForecastActions
                   bundle={bundle}
                   locations={locations}
-                  onPick={onPick}
+                  onLoadForecast={onLoadForecast}
                   selectedDayDate={day.date}
                 />
               }
@@ -224,7 +328,20 @@ function ForecastList({
         })}
       </List.Section>
 
-      <List.Section title="Hourly">
+      <List.Section
+        title={`Hourly · ${weatherDataLabel(bundle.sources.hourly)}`}
+        subtitle={feedIssueSubtitle(bundle.sources.hourly.issueTime)}
+      >
+        {hours.length === 0 && (
+          <List.Item
+            title="Hourly forecast unavailable"
+            subtitle={
+              bundle.sources.hourly.error ??
+              "No valid hourly forecast was returned."
+            }
+            icon={Icon.ExclamationMark}
+          />
+        )}
         {hours.map((hour) => {
           const formatted = formatHour(hour);
           return (
@@ -237,7 +354,7 @@ function ForecastList({
                 <ForecastActions
                   bundle={bundle}
                   locations={locations}
-                  onPick={onPick}
+                  onLoadForecast={onLoadForecast}
                 />
               }
             />
@@ -251,12 +368,12 @@ function ForecastList({
 function ForecastActions({
   bundle,
   locations,
-  onPick,
+  onLoadForecast,
   selectedDayDate,
 }: {
   bundle: WeatherBundle;
   locations: WeatherLocation[];
-  onPick: (state: State) => void;
+  onLoadForecast: LoadForecast;
   selectedDayDate?: string;
 }) {
   return (
@@ -273,21 +390,15 @@ function ForecastActions({
           <Action
             key={location.geohash}
             title={location.name}
-            onAction={async () => {
-              try {
-                const nextBundle = await fetchWeatherBundle(location);
-                onPick({ status: "forecast", bundle: nextBundle, locations });
-              } catch (error) {
-                await showToast({
-                  style: Toast.Style.Failure,
-                  title: "Could not switch location",
-                  message: errorMessage(error),
-                });
-              }
-            }}
+            onAction={() => onLoadForecast(location, locations, "switch")}
           />
         ))}
       </ActionPanel.Submenu>
+      <Action
+        title="Refresh Forecast"
+        icon={Icon.ArrowClockwise}
+        onAction={() => onLoadForecast(bundle.location, locations, "refresh")}
+      />
       <Action
         title="Set Location as Default"
         icon={Icon.Star}
@@ -337,13 +448,25 @@ function ForecastDetail({
     bundle.daily.data.find((day) => day.date === selectedDayDate) ??
     bundle.daily.data[0];
   const warnings = bundle.warnings.length
-    ? bundle.warnings
-        .map(
+    ? [
+        bundle.sources.warnings.status === "stale"
+          ? `> **Last known warnings — ${weatherDataLabel(bundle.sources.warnings)}.** Refresh or open Weather Warnings to verify.`
+          : "",
+        ...bundle.warnings.map(
           (warning) =>
             `- ${warning.title ?? warning.short_title ?? warning.type ?? "Warning"}`,
-        )
+        ),
+        bundle.expiredWarningCount
+          ? `_${bundle.expiredWarningCount} expired warning${bundle.expiredWarningCount === 1 ? " was" : "s were"} hidden._`
+          : "",
+      ]
+        .filter(Boolean)
         .join("\n")
-    : "No current warnings for this location.";
+    : bundle.sources.warnings.status === "fresh"
+      ? "BoM reported no current warnings for this location."
+      : `> **Current warnings could not be verified.** ${weatherDataLabel(bundle.sources.warnings)}${bundle.sources.warnings.error ? ` — ${bundle.sources.warnings.error}` : ""}`;
+  const currentMeta = currentWeatherMeta(bundle);
+  const feedMeta = currentWeatherFeedMeta(bundle);
 
   const markdown = [
     `# ${bundle.location.name}`,
@@ -352,14 +475,21 @@ function ForecastDetail({
     "",
     `${current.icon} **${current.shortText}**`,
     "",
-    `- Temperature: ${Math.round(current.temp)}° (feels ${Math.round(current.feelsLike)}°)`,
-    `- Rain: ${current.rainChance}% · ${current.rainRange}`,
+    `- Temperature: ${formatTemperature(current.temp)} (feels ${formatTemperature(current.feelsLike)})`,
+    `- Rain: ${formatRainChance(current.rainChance)} · ${current.rainRange}`,
     `- Wind: ${current.wind}`,
-    current.humidity ? `- Humidity: ${current.humidity}%` : "",
-    current.todayMax ? `- Max: ${Math.round(current.todayMax)}°` : "",
-    current.overnightMin
+    current.humidity !== undefined ? `- Humidity: ${current.humidity}%` : "",
+    current.todayMax !== undefined
+      ? `- Max: ${Math.round(current.todayMax)}°`
+      : "",
+    current.overnightMin !== undefined
       ? `- Overnight min: ${Math.round(current.overnightMin)}°`
       : "",
+    `- Combined data state: ${weatherDataLabel(currentMeta)}`,
+    ...feedMeta.map(
+      ({ label, meta }) =>
+        `- ${label}: ${weatherDataLabel(meta)}${meta.issueTime ? ` · issued ${formatIssueTime(meta.issueTime)}` : ""}`,
+    ),
     "",
     selectedDay
       ? `## ${new Date(selectedDay.date).toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })}`
@@ -389,4 +519,39 @@ function LocationManagementHint() {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatTemperature(value: number | null) {
+  return value == null ? "Unavailable" : `${Math.round(value)}°`;
+}
+
+function formatRainChance(value: number | null) {
+  return value == null ? "Unavailable" : `${Math.round(value)}%`;
+}
+
+function formatIssueTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-AU", {
+    day: "numeric",
+    month: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function feedIssueSubtitle(value?: string) {
+  return value ? `Issued ${formatIssueTime(value)}` : undefined;
+}
+
+function warningSummaryTitle(bundle: WeatherBundle) {
+  if (bundle.warnings.length) {
+    const noun = `warning${bundle.warnings.length === 1 ? "" : "s"}`;
+    return bundle.sources.warnings.status === "stale"
+      ? `${bundle.warnings.length} last known ${noun}`
+      : `${bundle.warnings.length} current ${noun}`;
+  }
+  return bundle.sources.warnings.status === "fresh"
+    ? "No current warnings"
+    : "Could not verify current warnings";
 }

@@ -16,7 +16,7 @@ export type RenderResult = {
   gifPath: string;
   frames: number;
   product: RadarProduct;
-  freshness: "fresh" | "stale";
+  freshness: "fresh" | "stale" | "unknown";
   latestFrameTime?: string;
   latestFrameAgeMinutes?: number;
   statusReport?: string;
@@ -46,10 +46,12 @@ export function isRadarProduct(value: unknown): value is RadarProduct {
   const product = value as Record<string, unknown>;
   return (
     typeof product.id === "string" &&
+    /^IDR[A-Z0-9]+$/.test(product.id) &&
     typeof product.site === "string" &&
     typeof product.state === "string" &&
     typeof product.label === "string" &&
-    typeof product.loopUrl === "string"
+    typeof product.loopUrl === "string" &&
+    /^https:\/\//.test(product.loopUrl)
   );
 }
 
@@ -58,7 +60,10 @@ export function isRadarFrame(value: unknown): value is RadarFrame {
   const frame = value as Record<string, unknown>;
   return (
     typeof frame.url === "string" &&
+    /^https?:\/\//.test(frame.url) &&
     typeof frame.file === "string" &&
-    (frame.timestamp === undefined || typeof frame.timestamp === "string")
+    /^[A-Za-z0-9._-]+\.png$/.test(frame.file) &&
+    (frame.timestamp === undefined ||
+      (typeof frame.timestamp === "string" && /^\d{12}$/.test(frame.timestamp)))
   );
 }
